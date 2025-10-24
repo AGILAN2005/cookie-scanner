@@ -1,0 +1,176 @@
+# Enhanced Docker Compose - Production Ready Configuration
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database with optimized configuration
+  postgresql:
+    image: postgres:15-alpine
+    container_name: cookie_scanner_db
+    environment:
+      POSTGRES_DB: cookie_consent_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d cookie_consent_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - cookie_scanner_network
+
+  # Redis for caching and job queue
+  redis:
+    image: redis:7-alpine
+    container_name: cookie_scanner_redis
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - cookie_scanner_network
+
+  # Enhanced Backend Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cookie_scanner_backend
+    ports:
+      - "8001:8000"
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://admin:admin123@postgresql:5432/cookie_consent_db
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379/0
+      
+      # Application Configuration
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      
+      # Scanning Configuration
+      SCAN_TIMEOUT: 60
+      MAX_CONCURRENT_SCANS: 3
+      BROWSER_HEADLESS: "true"
+      
+      # AI Configuration (Optional)
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-AIzaSyDs1apOb-NOowxJEQk9PmhVEGob4W5dG_o}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      
+      # Security
+      # SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      
+      # Performance
+      WORKERS: 1
+      MAX_REQUESTS: 1000
+      MAX_REQUESTS_JITTER: 100
+      
+      # Browser Configuration for Consistency
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - browser_cache:/ms-playwright
+    restart: unless-stopped
+    networks:
+      - cookie_scanner_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Celery Worker for Background Jobs
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cookie_scanner_worker
+    # <-- UPDATED: Changed worker.celery to worker.celery_app to match your Python code
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgresql:5432/cookie_consent_db
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-AIzaSyDs1apOb-NOowxJEQk9PmhVEGob4W5dG_o}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - browser_cache:/ms-playwright
+    restart: unless-stopped
+    networks:
+      - cookie_scanner_network
+    # In your docker-compose.yml under the 'celery_worker' service
+    healthcheck:
+      test: ["CMD", "true"]
+
+  # Enhanced Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cookie_scanner_frontend
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8001
+      - REACT_APP_ENV=production
+      - GENERATE_SOURCEMAP=false
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+    networks:
+      - cookie_scanner_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Persistent volumes
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local  
+  browser_cache:
+    driver: local
+
+# Custom network
+networks:
+  cookie_scanner_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
